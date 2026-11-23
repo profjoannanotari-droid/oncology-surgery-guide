@@ -1,72 +1,40 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useMemo, useState, useEffect } from "react";
+import { useMemo, useState, useEffect, createContext, useContext } from "react";
+import { Button } from "@/components/ui/button";
+import { getSigtapCatalog } from "@/lib/sigtap.functions";
+import { formatCompetence, classifyCompat } from "@/lib/sigtap";
+import type { Procedure, Subgroup, CompatEntry, CompatItem } from "@/lib/sigtap";
 import subgrupos from "@/data/subgrupos.json";
 import cidNames from "@/data/cidNames.json";
 import cboNames from "@/data/cboNames.json";
 import compatibilidades from "@/data/compatibilidades.json";
 
 export const Route = createFileRoute("/")({
-  component: Index,
+  loader: () => getSigtapCatalog(),
+  head: () => ({ meta: [
+    { title: "NotariSIGTAP — Consulta de procedimentos e compatibilidades" },
+    { name: "description", content: "Consulte procedimentos, CIDs, CBOs, materiais e compatibilidades SIGTAP com a competência da avaliação." },
+    { property: "og:title", content: "NotariSIGTAP — Consulta SIGTAP" },
+    { property: "og:description", content: "Procedimentos e compatibilidades por competência, com auditoria da base consultada." },
+    { property: "og:type", content: "website" },
+    { name: "twitter:card", content: "summary" },
+  ] }),
+  component: CatalogPage,
 });
 
-type Procedure = {
-  code: string;
-  name: string;
-  description: string;
-  complexity: string;
-  valorHosp: number;
-  valorAmb: number;
-  cid: string;
-  cidList?: string[];
-  valorHospSP?: number;
-  valorHospSH?: number;
-  valorHospTotal?: number;
-  atributoComplementar?: string;
-  sexo?: string;
-  idadeMinima?: string;
-  idadeMaxima?: string;
-  quantidadeMaxima?: number;
-  mediaPermanencia?: number;
-  pontos?: number;
-  especialidadeLeito?: string;
-  cbo?: string;
-  categoriaCbo?: string;
-};
-type Subgroup = { id: string; name: string; procedures: Procedure[] };
 type ResultGroup = { subgroup: Subgroup; procedures: Procedure[] };
 
-const data = subgrupos as Subgroup[];
 const CID_NAMES = cidNames as Record<string, string>;
 
-type CompatItem = {
-  code: string;
-  name: string;
-  qty: number;
-  since: string;
-  compatType: string;
-};
-type CompatEntry = { principalName: string; items: CompatItem[] };
-const COMPAT = compatibilidades as Record<string, CompatEntry>;
-
-const SUBGROUP_NAMES: Record<string, string> = Object.fromEntries(
-  data.map((sg) => [sg.id, sg.name]),
-);
-
-// Build CBO code -> name lookup from PDF data + procedures' categoriaCbo strings
-const CBO_NAMES: Record<string, string> = (() => {
-  const map: Record<string, string> = { ...(cboNames as Record<string, string>) };
-  for (const sg of data) {
-    for (const p of sg.procedures) {
-      const s = (p as Procedure).categoriaCbo;
-      if (!s) continue;
-      for (const part of s.split(",")) {
-        const m = part.trim().match(/^([0-9][0-9A-Z]{5})\s*-\s*(.+)$/);
-        if (m && !map[m[1]]) map[m[1]] = m[2].trim();
-      }
-    }
-  }
-  return map;
-})();
+const FALLBACK = { data: subgrupos as Subgroup[], COMPAT: compatibilidades as Record<string, CompatEntry>, competence: "202605", importedAt: null as string | null, sourceUrl: null as string | null, lastCheck: null as { checked_at: string; status: string; message: string } | null, unavailable: false, CBO_NAMES: cboNames as Record<string, string> };
+const CatalogContext = createContext(FALLBACK);
+const useCatalog = () => useContext(CatalogContext);
+function CatalogPage() {
+  const state = Route.useLoaderData();
+  const current = state.current;
+  const value = current ? { data: current.catalog.subgroups, COMPAT: current.catalog.compatibilities, competence: current.competence, importedAt: current.imported_at, sourceUrl: current.source_url, CBO_NAMES: current.catalog.cboNames, lastCheck: state.lastCheck, unavailable: state.unavailable } : { ...FALLBACK, lastCheck: state.lastCheck, unavailable: state.unavailable };
+  return <CatalogContext.Provider value={value}><Index key={current?.sha256 ?? "local"} /></CatalogContext.Provider>;
+}
 
 function normalizeCid(value: string): string {
   return value.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
@@ -95,7 +63,7 @@ function cidLabel(code: string): string {
   return "—";
 }
 
-function findProcedure(code: string): { proc: Procedure; subgroup: Subgroup } | null {
+function findProcedure(code: string, data: Subgroup[]): { proc: Procedure; subgroup: Subgroup } | null {
   for (const sg of data) {
     const p = sg.procedures.find((x) => x.code === code);
     if (p) return { proc: p, subgroup: sg };
@@ -103,22 +71,14 @@ function findProcedure(code: string): { proc: Procedure; subgroup: Subgroup } | 
   return null;
 }
 
-function classifyCompat(compatType: string): "compativel" | "concomitante" | "excludente" | "outros" {
-  const s = compatType.toLowerCase();
-  if (s.includes("exclud")) return "excludente";
-  if (s.includes("concomit") || s.includes("apac")) return "concomitante";
-  if (s.includes("compat")) return "compativel";
-  return "outros";
-}
-
 const COMPAT_LABELS: Record<string, { label: string; color: string; icon: string }> = {
   compativel: {
-    label: "Compatível (Principal × Secundário)",
+    label: "Compatível",
     color: "text-emerald-700 bg-emerald-50 border-emerald-200",
     icon: "✓",
   },
   concomitante: {
-    label: "Concomitante (APACs diferentes)",
+    label: "Concomitante",
     color: "text-sky-700 bg-sky-50 border-sky-200",
     icon: "≡",
   },
@@ -220,10 +180,12 @@ function ProcedureDetail({
   onBack: () => void;
   onOpenProcedure: (code: string) => void;
 }) {
+  const { data, COMPAT, CBO_NAMES, competence, importedAt } = useCatalog();
+  const SUBGROUP_NAMES = Object.fromEntries(data.map(s => [s.id, s.name]));
   const [openSubgroup, setOpenSubgroup] = useState<string | null>(null);
   const [compatQuery, setCompatQuery] = useState("");
 
-  const found = findProcedure(code);
+  const found = findProcedure(code, data);
   if (!found) {
     return (
       <div className="rounded-lg border border-border bg-card px-4 py-10 text-center text-sm text-muted-foreground">
@@ -267,7 +229,7 @@ function ProcedureDetail({
 
   const fmtMoney = (v?: number) =>
     typeof v === "number" ? `R$ ${v.toFixed(2)}` : "—";
-  const fmtNum = (v?: number) => (typeof v === "number" ? String(v) : "—");
+  const fmtNum = (v?: number | null) => (typeof v === "number" ? String(v) : "—");
   const fmtStr = (v?: string, fb = "—") => (v && v.trim() ? v : fb);
 
   return (
@@ -292,6 +254,7 @@ function ProcedureDetail({
         <div>
           <div className="font-mono text-xs text-muted-foreground">
             {p.code} · SubGrupo {subgroup.id}
+            <div className="mt-2 font-sans text-xs text-primary">Competência da avaliação: {formatCompetence(competence)} · {importedAt ? "Base oficial SIGTAP" : "Base local de referência"}</div>
           </div>
           <h2 className="mt-1 text-lg font-semibold leading-snug">{p.name}</h2>
           <p className="text-xs text-muted-foreground">{subgroup.name}</p>
@@ -423,7 +386,7 @@ function ProcedureDetail({
                           {sgItems.map((it) => {
                             const cat = classifyCompat(it.compatType);
                             const info = COMPAT_LABELS[cat];
-                            const exists = !!findProcedure(it.code);
+                            const exists = !!findProcedure(it.code, data);
                             return (
                               <li key={`${sgId}-${it.code}`}>
                                 <button
@@ -543,6 +506,7 @@ function MultipleSurgeryScreen({
   onBack: () => void;
   onOpen: (code: string) => void;
 }) {
+  const { data, COMPAT } = useCatalog();
   const sg = data.find((s) => s.id === "0415");
   const procs = (sg?.procedures ?? []).filter((p) => COMPAT[p.code]?.items?.length);
 
@@ -611,6 +575,7 @@ function MultipleSurgeryScreen({
 }
 
 function AuditModal({ onClose }: { onClose: () => void }) {
+  const { data, COMPAT, competence, importedAt, sourceUrl, lastCheck } = useCatalog();
   const stats = useMemo(() => {
     const totalSubgroups = data.length;
     const totalProcedures = data.reduce((t, s) => t + s.procedures.length, 0);
@@ -644,20 +609,22 @@ function AuditModal({ onClose }: { onClose: () => void }) {
     };
   }, []);
 
-  const competencia = "05/2026";
+  const competencia = formatCompetence(competence);
 
   const downloadCsv = () => {
     const lines = [
       `Relatório de Auditoria - NotariSIGTAP`,
       `Competência;${competencia}`,
-      `Base SIGTAP;Maio/2026`,
+      `Fonte;${sourceUrl ?? "Base local de referência"}`,
+      `Importação;${importedAt ?? "Sem registro de importação automática"}`,
+      `Última verificação;${lastCheck?.checked_at ?? "Ainda não realizada"}`,
       ``,
       `Indicador;Valor`,
       `Total de subgrupos;${stats.totalSubgroups}`,
       `Total de procedimentos;${stats.totalProcedures}`,
       `Procedimentos principais com compatibilidade;${stats.totalPrincipals}`,
       `Total de itens de compatibilidade;${stats.totalItems}`,
-      `Cobertura (%);${stats.coverage}`,
+      `Procedimentos com vínculos (%);${stats.coverage}`,
       ``,
       `Tipo de compatibilidade;Qtd itens`,
       ...Object.entries(stats.byType).map(([t, n]) => `${t};${n}`),
@@ -692,7 +659,7 @@ function AuditModal({ onClose }: { onClose: () => void }) {
               🔎 Auditoria de Compatibilidades
             </h2>
             <p className="text-xs text-muted-foreground">
-              Competência {competencia} · Base SIGTAP Maio/2026
+              Competência {competencia} · {importedAt ? "Base oficial importada" : "Base local de referência"}
             </p>
           </div>
           <div className="flex gap-2">
@@ -712,6 +679,14 @@ function AuditModal({ onClose }: { onClose: () => void }) {
         </div>
 
         <div className="space-y-5 px-5 py-4 text-sm">
+          <section className="border-b border-border pb-4">
+            <h3 className="mb-2 font-semibold">Atualização da base</h3>
+            <p>Competência utilizada: {competencia}</p>
+            <p className="text-xs text-muted-foreground">Importação: {importedAt ? new Date(importedAt).toLocaleString("pt-BR", { timeZone: "UTC" }) : "Base local, sem importação automática validada"}</p>
+            <p className="mt-2 text-xs">{lastCheck?.message ?? "Aguardando primeira verificação automática do DATASUS."}</p>
+            {lastCheck && <p className="text-xs text-muted-foreground">Última tentativa: {new Date(lastCheck.checked_at).toLocaleString("pt-BR", { timeZone: "UTC" })}</p>}
+            {sourceUrl && <a className="mt-2 inline-block text-xs text-primary underline" href={sourceUrl} target="_blank" rel="noreferrer">Arquivo oficial da competência</a>}
+          </section>
           <section>
             <h3 className="mb-2 font-semibold">Resumo</h3>
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
@@ -719,7 +694,7 @@ function AuditModal({ onClose }: { onClose: () => void }) {
               <Stat label="Procedimentos" value={stats.totalProcedures} />
               <Stat label="Principais c/ compat." value={stats.totalPrincipals} />
               <Stat label="Itens de compat." value={stats.totalItems} />
-              <Stat label="Cobertura" value={`${stats.coverage}%`} />
+              <Stat label="Procedimentos com vínculos" value={`${stats.coverage}%`} />
             </div>
           </section>
 
@@ -796,7 +771,7 @@ type CboSuggestion = { code: string; name: string };
 type MaterialSuggestion = { code: string; name: string };
 
 // Materials catalog: prefer subgroup 0702 procedures; fallback to any 0702 codes referenced in compatibilities
-const MATERIALS_0702: MaterialSuggestion[] = (() => {
+function getMaterials(data: Subgroup[], COMPAT: Record<string, CompatEntry>): MaterialSuggestion[] {
   const map = new Map<string, string>();
   const sg0702 = data.find((s) => s.id === "0702");
   if (sg0702) for (const p of sg0702.procedures) map.set(p.code, p.name);
@@ -808,9 +783,11 @@ const MATERIALS_0702: MaterialSuggestion[] = (() => {
   return Array.from(map, ([code, name]) => ({ code, name })).sort((a, b) =>
     a.code.localeCompare(b.code),
   );
-})();
+}
 
 function Index() {
+  const { data, COMPAT, CBO_NAMES, competence, importedAt, lastCheck, unavailable } = useCatalog();
+  const MATERIALS_0702 = useMemo(() => getMaterials(data, COMPAT), [data, COMPAT]);
   const [searchType, setSearchType] = useState<SearchType>("cid");
 
   // CID flow
@@ -1028,7 +1005,7 @@ function Index() {
             <div>
               <h1 className="text-xl font-semibold tracking-tight">NotariSIGTAP</h1>
               <p className="text-xs text-white/80">
-                Guia de Procedimentos Cirúrgicos · SIGTAP Grupo 04
+                Procedimentos Cirúrgicos e Especiais · SIGTAP
               </p>
             </div>
           </div>
@@ -1037,16 +1014,17 @@ function Index() {
 
       <div className="border-b border-border bg-white">
         <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-x-4 gap-y-1 px-6 py-2 text-xs text-muted-foreground">
-          <span>📚 Base SIGTAP Maio/2026</span>
-          <span>· competência 05/2026</span>
+          <span>📚 Base SIGTAP · competência {formatCompetence(competence)}</span>
+          <span>· {importedAt ? "Base oficial importada" : "Base local de referência"}</span>
+          <span title={lastCheck?.message ?? "Aguardando primeira verificação"}>· {unavailable ? "Verificação indisponível" : lastCheck?.status === "falha" ? "Atualização oficial pendente" : lastCheck ? `Verificada em ${new Date(lastCheck.checked_at).toLocaleDateString("pt-BR", { timeZone: "UTC" })}` : "Aguardando atualização oficial"}</span>
           <span>· {data.length} subgrupos</span>
-          <button
+          <Button asChild variant="outline" size="sm"><button
             onClick={() => setShowAudit(true)}
             className="rounded border border-border px-2 py-0.5 text-xs hover:bg-accent"
             title="Relatório mensal de auditoria das tabelas de compatibilidade"
           >
             🔎 Auditoria
-          </button>
+          </button></Button>
           {(detailCode || submitted || showMulti) && (
             <button
               onClick={resetAll}
@@ -1397,7 +1375,7 @@ function Index() {
             {submitted && (
               <section>
                 <p className="mb-3 text-xs text-muted-foreground">
-                  {totalFiltered} procedimento{totalFiltered === 1 ? "" : "s"} encontrado
+                  Competência da avaliação: {formatCompetence(competence)} · {totalFiltered} procedimento{totalFiltered === 1 ? "" : "s"} encontrado
                   {totalFiltered === 1 ? "" : "s"}
                   {searchType === "cid" && selectedCid && (
                     <>

@@ -1,0 +1,10 @@
+CREATE TABLE public.sigtap_catalogs (competence text PRIMARY KEY CHECK (competence ~ '^[0-9]{6}$'), source_url text NOT NULL, imported_at timestamptz NOT NULL DEFAULT now(), sha256 text NOT NULL, catalog jsonb NOT NULL, procedure_count integer NOT NULL, compatibility_count integer NOT NULL);
+GRANT SELECT ON public.sigtap_catalogs TO anon, authenticated;
+GRANT ALL ON public.sigtap_catalogs TO service_role;
+ALTER TABLE public.sigtap_catalogs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Public validated catalogs" ON public.sigtap_catalogs FOR SELECT TO anon, authenticated USING (true);
+CREATE TABLE public.sigtap_update_runs (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), checked_at timestamptz NOT NULL DEFAULT now(), status text NOT NULL, competence text, message text NOT NULL);
+GRANT SELECT ON public.sigtap_update_runs TO anon, authenticated;
+GRANT ALL ON public.sigtap_update_runs TO service_role;
+ALTER TABLE public.sigtap_update_runs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "Public update history" ON public.sigtap_update_runs FOR SELECT TO anon, authenticated USING (true);
